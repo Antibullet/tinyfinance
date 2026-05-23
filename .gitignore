@@ -1,0 +1,17 @@
+node_modules/
+dist/
+
+# Local hackathon data and generated analysis outputs
+*.parquet
+*.zip
+*.tar.gz
+parsed_outputs/
+data/
+*.xlsx
+*.csv
+*.pdf
+
+# Environment/local files
+.env
+.env.*
+.DS_Store

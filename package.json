@@ -1,0 +1,17 @@
+{
+  "name": "aiven-recency-rebalancer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "recent:rebalance": "tsx recent_market_rebalancer.ts"
+  },
+  "dependencies": {
+    "duckdb": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest"
+  }
+}
