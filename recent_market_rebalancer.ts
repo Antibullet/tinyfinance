@@ -5,56 +5,51 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 const duckdb = require("duckdb");
 
-const USD_TO_EUR = 0.92;
-const HOURS_PER_MONTH = 730;
+const RATIO_PRICE_SOURCE_NOTE = "cross_cloud_list_prices.parquet p50_ratio; missing ratios default to 1.0 like AIEVEN";
 
-type CloudMap = {
+type RatioPrice = {
   cloud: string;
-  provider: string;
-  confidence: "high" | "medium-high" | "low";
-  evidence: string;
-};
-
-type ProviderPrice = {
-  provider: string;
-  priceClass: string;
-  eurPerUnit: number;
-  allowReroute: boolean;
+  geoBucket: string;
+  skuFamily: string;
+  unit: string;
+  p25Ratio: number | null;
+  p50Ratio: number;
+  p75Ratio: number | null;
   sourceNote: string;
 };
 
 type ForecastRow = {
-  currentProvider: string;
-  targetProvider: string;
+  currentCloud: string;
+  targetCloud: string;
   priceClass: string;
   forecastUnits: number;
-  currentEurPerUnit: number;
-  targetEurPerUnit: number;
-  currentCostEur: number;
-  optimizedCostEur: number;
-  savingsEur: number;
+  currentRatio: number;
+  targetRatio: number;
+  currentCostRatioUnits: number;
+  optimizedCostRatioUnits: number;
+  savingsRatioUnits: number;
 };
 
 type ShareRow = {
-  provider: string;
-  currentWorkloadValueEur: number;
+  cloud: string;
+  currentWorkloadValueRatioUnits: number;
   currentWorkloadSharePct: number;
-  targetWorkloadValueEur: number;
+  targetWorkloadValueRatioUnits: number;
   targetWorkloadSharePct: number;
   workloadShareDeltaPctPoints: number;
-  currentCostEur: number;
-  optimizedCostEur: number;
+  currentCostRatioUnits: number;
+  optimizedCostRatioUnits: number;
   optimizedCostSharePct: number;
 };
 
 type ForecastSummary = {
-  forecastCurrentCostEur: number;
-  forecastLowMarketCostEur: number;
-  forecastHighMarketCostEur: number;
-  forecastOptimizedCostEur: number;
-  forecastSavingsEur: number;
-  requiredRevenueFor10PctMarginEur: number;
-  profitAt10PctMarginEur: number;
+  forecastCurrentCostRatioUnits: number;
+  forecastLowMarketCostRatioUnits: number;
+  forecastHighMarketCostRatioUnits: number;
+  forecastOptimizedCostRatioUnits: number;
+  forecastSavingsRatioUnits: number;
+  requiredRevenueFor10PctMarginRatioUnits: number;
+  profitAt10PctMarginRatioUnits: number;
   optimizedMarginPctIfRevenueUnchanged: number;
 };
 
@@ -85,125 +80,6 @@ type Args = {
   lookbackDays: number;
   ewmaAlpha: number;
 };
-
-const cloudMap: CloudMap[] = [
-  {
-    cloud: "cloud_b",
-    provider: "Google Cloud",
-    confidence: "medium-high",
-    evidence: "Split CPU/RAM billing, commitment-discount style rows, persistent disk and inter-zone transfer terms.",
-  },
-  {
-    cloud: "cloud_c",
-    provider: "Microsoft Azure",
-    confidence: "high",
-    evidence: "Premium SSD v2, Managed Disks, Dv2/Dasv5/Dsv5/Dpsv5 VM series, Virtual Network.",
-  },
-  {
-    cloud: "cloud_d",
-    provider: "AWS",
-    confidence: "high",
-    evidence: "EBS Volume, LCU hours, public IPv4, and AWS-like network egress line items.",
-  },
-  {
-    cloud: "cloud_a",
-    provider: "UpCloud",
-    confidence: "low",
-    evidence: "Highly scrubbed unknown-unit rows. Treated as a small independent-cloud footprint for this scenario only.",
-  },
-];
-
-const eur = (usd: number) => usd * USD_TO_EUR;
-
-const providerPrices: ProviderPrice[] = [
-  price("Google Cloud", "compute_general_hour", eur(0.096), true, "Representative N2/E2 2-vCPU VM-hour assumption."),
-  price("Google Cloud", "compute_cpu_hour", eur(0.0475), true, "Approximate GCP vCPU-hour proxy."),
-  price("Google Cloud", "memory_gib_hour", eur(0.0064), true, "Approximate GCP RAM GiB-hour proxy."),
-  price("Google Cloud", "compute_memory_hour", eur(0.126), true, "Representative memory-leaning VM-hour assumption."),
-  price("Google Cloud", "ssd_gb_month", eur(0.17), true, "Approximate persistent SSD GB-month assumption."),
-  price("Google Cloud", "hdd_gb_month", eur(0.04), true, "Approximate standard disk GB-month assumption."),
-  price("Google Cloud", "egress_internet_gb", eur(0.12), true, "Representative internet egress GB assumption."),
-  price("Google Cloud", "egress_intra_gb", eur(0.01), true, "Representative same/near-region transfer GB assumption."),
-  price("Google Cloud", "egress_cross_gb", eur(0.02), true, "Representative inter-region transfer GB assumption."),
-  price("Google Cloud", "ipv4_hour", eur(0.004), true, "Public IPv4 hourly assumption."),
-  price("Google Cloud", "lb_hour", eur(0.025), true, "Representative load-balancer hour assumption."),
-  price("Google Cloud", "lcu_hour", eur(0.008), true, "Generic load-balancer capacity unit assumption."),
-  price("Google Cloud", "other_network_gb", eur(0.01), true, "Fallback private-network GB assumption."),
-
-  price("Microsoft Azure", "compute_general_hour", eur(0.096), true, "Representative D-series 2-vCPU Linux VM-hour assumption."),
-  price("Microsoft Azure", "compute_cpu_hour", eur(0.049), true, "Derived D/F-series vCPU-hour proxy."),
-  price("Microsoft Azure", "memory_gib_hour", eur(0.0068), true, "Derived RAM GiB-hour proxy."),
-  price("Microsoft Azure", "compute_memory_hour", eur(0.13), true, "Representative memory-leaning VM-hour assumption."),
-  price("Microsoft Azure", "ssd_gb_month", eur(0.15), true, "Representative Premium SSD/Premium SSD v2 GB-month assumption."),
-  price("Microsoft Azure", "hdd_gb_month", eur(0.045), true, "Representative standard HDD/managed disk GB-month assumption."),
-  price("Microsoft Azure", "egress_internet_gb", eur(0.087), true, "Representative Azure internet egress GB assumption."),
-  price("Microsoft Azure", "egress_intra_gb", eur(0.01), true, "Representative intra-zone/intra-region transfer GB assumption."),
-  price("Microsoft Azure", "egress_cross_gb", eur(0.02), true, "Representative inter-region transfer GB assumption."),
-  price("Microsoft Azure", "ipv4_hour", eur(0.005), true, "Public IPv4 hourly assumption."),
-  price("Microsoft Azure", "lb_hour", eur(0.025), true, "Representative load-balancer hour assumption."),
-  price("Microsoft Azure", "lcu_hour", eur(0.008), true, "Generic load-balancer capacity unit assumption."),
-  price("Microsoft Azure", "other_network_gb", eur(0.01), true, "Fallback private-network GB assumption."),
-
-  price("AWS", "compute_general_hour", eur(0.1008), true, "Representative m7i.large Linux on-demand VM-hour assumption."),
-  price("AWS", "compute_cpu_hour", eur(0.085), true, "Representative c7i.large-ish compute-optimized VM-hour assumption."),
-  price("AWS", "memory_gib_hour", eur(0.0068), true, "AWS normally prices instances; this is a RAM GiB-hour proxy."),
-  price("AWS", "compute_memory_hour", eur(0.126), true, "Representative memory-leaning VM-hour assumption."),
-  price("AWS", "ssd_gb_month", eur(0.08), true, "EBS gp3-style GB-month assumption."),
-  price("AWS", "hdd_gb_month", eur(0.045), true, "EBS HDD-style GB-month assumption."),
-  price("AWS", "egress_internet_gb", eur(0.09), true, "Representative first-tier internet egress GB assumption."),
-  price("AWS", "egress_intra_gb", eur(0.01), true, "Representative same-region/AZ transfer GB assumption."),
-  price("AWS", "egress_cross_gb", eur(0.02), true, "Representative inter-region transfer GB assumption."),
-  price("AWS", "ipv4_hour", eur(0.005), true, "AWS public IPv4 hourly charge assumption."),
-  price("AWS", "lb_hour", eur(0.0225), true, "Application/NLB hourly assumption."),
-  price("AWS", "lcu_hour", eur(0.008), true, "Load balancer capacity unit assumption."),
-  price("AWS", "other_network_gb", eur(0.01), true, "Fallback private-network GB assumption."),
-
-  price("UpCloud", "compute_general_hour", 24 / 672, true, "Cloud Native 2-vCPU/8GB at EUR 24/month over 28-day cap."),
-  price("UpCloud", "compute_cpu_hour", 15 / 672, true, "Cloud Native 2-vCPU/4GB at EUR 15/month over 28-day cap."),
-  price("UpCloud", "memory_gib_hour", (24 / 672) / 8, true, "Derived from Cloud Native 2-vCPU/8GB plan."),
-  price("UpCloud", "compute_memory_hour", 34 / 672, true, "Cloud Native 2-vCPU/16GB at EUR 34/month over 28-day cap."),
-  price("UpCloud", "ssd_gb_month", 0.22, true, "MaxIOPS block storage EUR 0.22/GB/month."),
-  price("UpCloud", "hdd_gb_month", 0.085, true, "Standard block storage EUR 0.085/GB/month."),
-  price("UpCloud", "egress_internet_gb", 0, true, "Advertised zero-cost transfer; fair transfer policy applies."),
-  price("UpCloud", "egress_intra_gb", 0, true, "Assumed included private/intra transfer."),
-  price("UpCloud", "egress_cross_gb", 0, true, "Assumed included transfer; fair transfer policy applies."),
-  price("UpCloud", "ipv4_hour", 3.47 / 672, true, "Additional public IPv4 EUR 3.47/month over 28-day cap."),
-  price("UpCloud", "lb_hour", 0.02, true, "Generic load-balancer assumption."),
-  price("UpCloud", "lcu_hour", 0.008, true, "Generic capacity-unit assumption."),
-  price("UpCloud", "other_network_gb", 0, true, "Assumed included private transfer."),
-
-  price("Vultr", "compute_general_hour", eur(0.060), true, "VX1 2-vCPU/8GB at USD 0.060/hour."),
-  price("Vultr", "compute_cpu_hour", eur(0.060), true, "VX1 proxy; no separate vCPU billing in this model."),
-  price("Vultr", "memory_gib_hour", eur(0.080) / 16, true, "Memory-optimized 2-vCPU/16GB divided by RAM."),
-  price("Vultr", "compute_memory_hour", eur(0.080), true, "Memory-optimized 2-vCPU/16GB at USD 0.080/hour."),
-  price("Vultr", "ssd_gb_month", eur(0.10), true, "Block storage rough assumption."),
-  price("Vultr", "hdd_gb_month", eur(0.05), true, "Lower-performance storage rough assumption."),
-  price("Vultr", "egress_internet_gb", eur(0.01), true, "Overage/included-bandwidth proxy."),
-  price("Vultr", "egress_intra_gb", 0, true, "Assumed private transfer included."),
-  price("Vultr", "egress_cross_gb", eur(0.01), true, "Cross-region transfer proxy."),
-  price("Vultr", "ipv4_hour", eur(2 / 730), true, "Public IPv4 rough monthly proxy."),
-  price("Vultr", "lb_hour", eur(0.014), true, "Load balancer rough hourly proxy."),
-  price("Vultr", "lcu_hour", eur(0.006), true, "Generic capacity-unit assumption."),
-  price("Vultr", "other_network_gb", 0, true, "Assumed private transfer included."),
-
-  price("Render", "compute_general_hour", eur(85 / 730), false, "Pro service 2 CPU/4GB at USD 85/month; PaaS, not equivalent IaaS."),
-  price("Render", "compute_cpu_hour", eur(85 / 730), false, "PaaS service proxy; excluded from reroute optimization."),
-  price("Render", "memory_gib_hour", eur((85 / 730) / 4), false, "Derived from Pro service 4GB RAM; excluded from reroute optimization."),
-  price("Render", "compute_memory_hour", eur(100 / 730), false, "Render managed Postgres/service proxy; excluded from reroute optimization."),
-  price("Render", "ssd_gb_month", eur(0.25), false, "Persistent disks USD 0.25/GB/month."),
-  price("Render", "hdd_gb_month", eur(0.25), false, "Persistent disks USD 0.25/GB/month."),
-  price("Render", "egress_internet_gb", eur(0.10), false, "Generic bandwidth overage proxy; PaaS not equivalent."),
-  price("Render", "egress_intra_gb", 0, false, "No direct IaaS equivalent."),
-  price("Render", "egress_cross_gb", eur(0.10), false, "Generic bandwidth proxy; PaaS not equivalent."),
-  price("Render", "ipv4_hour", 0, false, "Feature-dependent; no direct IaaS equivalent."),
-  price("Render", "lb_hour", 0, false, "Platform abstraction; no direct IaaS equivalent."),
-  price("Render", "lcu_hour", 0, false, "No LCU equivalent."),
-  price("Render", "other_network_gb", 0, false, "No direct equivalent."),
-];
-
-function price(provider: string, priceClass: string, eurPerUnit: number, allowReroute: boolean, sourceNote: string): ProviderPrice {
-  return { provider, priceClass, eurPerUnit, allowReroute, sourceNote };
-}
 
 class DuckDB {
   private readonly db: any;
@@ -238,8 +114,9 @@ async function main() {
   await mkdir(args.outDir, { recursive: true });
 
   const usagePath = path.join(args.dataDir, "aiven_usage.parquet");
+  const pricesPath = path.join(args.dataDir, "cross_cloud_list_prices.parquet");
   const db = new DuckDB();
-  await setupTables(db);
+  await setupTables(db, pricesPath);
   await createCostedView(db, usagePath);
 
   const bounds = await db.all<{ max_date: string; current_month_start: string; latest_full_month_start: string }>(`
@@ -264,19 +141,11 @@ async function main() {
   const shareRows = buildShareRows(forecastRows);
   const summary = buildForecastSummary(forecastRows, args);
   const topMoves = forecastRows
-    .filter((row) => row.savingsEur > 0.01)
-    .sort((a, b) => b.savingsEur - a.savingsEur)
+    .filter((row) => row.savingsRatioUnits > 0.01)
+    .sort((a, b) => b.savingsRatioUnits - a.savingsRatioUnits)
     .slice(0, 30);
 
-  const providerPricesForTomorrow = providerPrices.map((row) => ({
-    provider: row.provider,
-    priceClass: row.priceClass,
-    baseEurPerUnit: row.eurPerUnit,
-    lowEurPerUnit: row.eurPerUnit * (1 - args.marketFluctuation),
-    highEurPerUnit: row.eurPerUnit * (1 + args.marketFluctuation),
-    allowReroute: row.allowReroute,
-    sourceNote: row.sourceNote,
-  }));
+  const ratioPricesForTomorrow = await db.all<RatioPrice>(ratioPriceCatalogSql(args));
 
   const output: ReportOutput = {
     generatedAt: new Date().toISOString(),
@@ -288,7 +157,7 @@ async function main() {
       marketFluctuation: args.marketFluctuation,
       ewmaAlpha: args.ewmaAlpha,
     },
-    warning: "This is an assumption model. The Parquet data has sanitized/noised amounts and no real Aiven revenue.",
+    warning: "This is an assumption model. Costs are ratio-weighted units from sanitized/noised amounts, not EUR invoices or real Aiven revenue.",
     forecastSummary: summary,
     recommendedShareChanges: shareRows,
     topMoves,
@@ -303,12 +172,11 @@ async function main() {
   const htmlReport = buildHtmlReport(output, args);
 
   await writeCsv(path.join(args.outDir, "recent_window_summary.csv"), windowSummary);
-  await writeCsv(path.join(args.outDir, "latest_day_by_provider.csv"), latestDay);
+  await writeCsv(path.join(args.outDir, "latest_day_by_cloud.csv"), latestDay);
   await writeCsv(path.join(args.outDir, "tomorrow_forecast_by_price_class.csv"), forecastRows);
-  await writeCsv(path.join(args.outDir, "recommended_provider_share_changes.csv"), shareRows);
+  await writeCsv(path.join(args.outDir, "recommended_cloud_share_changes.csv"), shareRows);
   await writeCsv(path.join(args.outDir, "top_tomorrow_moves.csv"), topMoves);
-  await writeCsv(path.join(args.outDir, "tomorrow_unit_price_assumptions.csv"), providerPricesForTomorrow);
-  await writeCsv(path.join(args.outDir, "cloud_mapping_assumptions_ts.csv"), cloudMap);
+  await writeCsv(path.join(args.outDir, "tomorrow_ratio_price_assumptions.csv"), ratioPricesForTomorrow);
   await writeFile(path.join(args.outDir, "recent_rebalancer_payload.json"), JSON.stringify(output, jsonReplacer, 2), "utf8");
   await writeFile(markdownReportPath, buildReport(output, args), "utf8");
   await writeFile(htmlReportPath, htmlReport, "utf8");
@@ -319,9 +187,9 @@ async function main() {
   console.log(`Markdown report: ${markdownReportPath}`);
   console.log(`HTML website: ${htmlReportPath}`);
   console.log(`Forecast date: ${tomorrow}`);
-  console.log(`Forecast base cost EUR: ${formatMoney(summary.forecastCurrentCostEur)}`);
-  console.log(`Forecast optimized cost EUR: ${formatMoney(summary.forecastOptimizedCostEur)}`);
-  console.log(`Forecast savings EUR: ${formatMoney(summary.forecastSavingsEur)}`);
+  console.log(`Forecast base ratio units: ${formatRatioUnits(summary.forecastCurrentCostRatioUnits)}`);
+  console.log(`Forecast optimized ratio units: ${formatRatioUnits(summary.forecastOptimizedCostRatioUnits)}`);
+  console.log(`Forecast savings ratio units: ${formatRatioUnits(summary.forecastSavingsRatioUnits)}`);
 }
 
 function parseArgs(argv: string[]): Args {
@@ -351,68 +219,110 @@ function parseArgs(argv: string[]): Args {
   };
 }
 
-async function setupTables(db: DuckDB) {
-  await db.run("CREATE TEMP TABLE cloud_map(cloud VARCHAR, provider VARCHAR, confidence VARCHAR, evidence VARCHAR)");
-  await db.run(`INSERT INTO cloud_map VALUES ${cloudMap.map((row) => sqlTuple([row.cloud, row.provider, row.confidence, row.evidence])).join(",")}`);
-  await db.run("CREATE TEMP TABLE provider_prices(provider VARCHAR, price_class VARCHAR, eur_per_unit DOUBLE, allow_reroute BOOLEAN, source_note VARCHAR)");
-  await db.run(`INSERT INTO provider_prices VALUES ${providerPrices.map((row) => sqlTuple([row.provider, row.priceClass, row.eurPerUnit, row.allowReroute, row.sourceNote])).join(",")}`);
+async function setupTables(db: DuckDB, pricesPath: string) {
+  await db.run(`
+    CREATE OR REPLACE TEMP VIEW price_catalog AS
+    SELECT cloud,
+           geo_bucket,
+           sku_family,
+           ${normalizedUnitSql("unit")} AS unit_n,
+           p25_ratio,
+           p50_ratio,
+           p75_ratio,
+           ${sqlValue(RATIO_PRICE_SOURCE_NOTE)} AS source_note
+    FROM read_parquet('${sqlString(pricesPath)}')
+    WHERE p50_ratio IS NOT NULL
+  `);
 }
 
 async function createCostedView(db: DuckDB, usagePath: string) {
   await db.run(`
     CREATE OR REPLACE TEMP VIEW costed AS
-    WITH classified AS (
+    WITH usage_normalized AS (
       SELECT u.*,
-             cm.provider,
-             cm.confidence AS provider_mapping_confidence,
-             CASE
-               WHEN sku_family = 'commitment-discount' THEN 'excluded_commitment_discount'
-               WHEN sku_family = 'compute-cpu-optimized' AND unit = 'hour' THEN 'compute_cpu_hour'
-               WHEN sku_family = 'compute-general' AND unit IN ('hour', 'unknown') THEN 'compute_general_hour'
-               WHEN sku_family = 'compute-memory' AND unit = 'gib-hour' THEN 'memory_gib_hour'
-               WHEN sku_family = 'compute-memory' AND unit = 'hour' THEN 'compute_memory_hour'
-               WHEN sku_family = 'storage-block-ssd' AND unit = 'gib-hour' THEN 'ssd_gb_month'
-               WHEN sku_family = 'storage-block-ssd' AND unit IN ('gib-month', 'gb-month') THEN 'ssd_gb_month'
-               WHEN sku_family = 'storage-block-hdd' AND unit IN ('gib-month', 'gb-month', 'month', '10k') THEN 'hdd_gb_month'
-               WHEN sku_family = 'egress-internet' AND unit IN ('gb', 'gib') THEN 'egress_internet_gb'
-               WHEN sku_family = 'egress-internet' AND unit IN ('hour', '1/hour') THEN 'lb_hour'
-               WHEN sku_family = 'egress-intra-region' AND unit IN ('gb', 'gib') THEN 'egress_intra_gb'
-               WHEN sku_family = 'egress-cross-region' AND unit IN ('gb', 'gib') THEN 'egress_cross_gb'
-               WHEN sku_family = 'network-public-ip' AND unit = 'hour' THEN 'ipv4_hour'
-               WHEN sku_family = 'network-lb' AND unit = 'hour' THEN 'lb_hour'
-               WHEN sku_family = 'network-lb' AND unit IN ('gb', 'gib') THEN 'other_network_gb'
-               WHEN unit = 'lcu-hrs' THEN 'lcu_hour'
-               WHEN sku_family = 'other' AND cost_category_group = 'Compute' AND unit IN ('hour', 'unknown', 'vcpu-hours') THEN 'compute_general_hour'
-               WHEN sku_family = 'other' AND cost_category_group = 'Network' AND unit IN ('gb', 'gib') THEN 'other_network_gb'
-               ELSE 'unpriced'
-             END AS price_class,
-             CASE
-               WHEN sku_family = 'storage-block-ssd' AND unit = 'gib-hour' THEN amount / ${HOURS_PER_MONTH}
-               ELSE amount
-             END AS billable_units
+             ${normalizedUnitSql("u.unit")} AS unit_n,
+             concat(u.geo_bucket, '/', u.sku_family, '/', ${normalizedUnitSql("u.unit")}) AS price_class,
+             u.amount AS billable_units
       FROM read_parquet('${sqlString(usagePath)}') u
-      LEFT JOIN cloud_map cm USING (cloud)
+    ),
+    baseline_catalog AS (
+      SELECT DISTINCT 'cloud_a' AS cloud,
+             geo_bucket,
+             sku_family,
+             unit_n,
+             CAST(NULL AS DOUBLE) AS p25_ratio,
+             1.0 AS p50_ratio,
+             CAST(NULL AS DOUBLE) AS p75_ratio,
+             'implied cloud_a baseline ratio' AS source_note
+      FROM usage_normalized
+    ),
+    catalog AS (
+      SELECT cloud, geo_bucket, sku_family, unit_n, p25_ratio, p50_ratio, p75_ratio, source_note
+      FROM price_catalog
+      UNION ALL
+      SELECT b.cloud, b.geo_bucket, b.sku_family, b.unit_n, b.p25_ratio, b.p50_ratio, b.p75_ratio, b.source_note
+      FROM baseline_catalog b
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM price_catalog p
+        WHERE p.cloud = b.cloud
+          AND p.geo_bucket = b.geo_bucket
+          AND p.sku_family = b.sku_family
+          AND p.unit_n = b.unit_n
+      )
+    ),
+    current_priced AS (
+      SELECT u.*,
+             pc.p50_ratio AS catalog_p50_ratio,
+             coalesce(pc.p50_ratio, 1.0) AS current_ratio,
+             pc.source_note AS ratio_source_note
+      FROM usage_normalized u
+      LEFT JOIN catalog pc USING (cloud, geo_bucket, sku_family, unit_n)
     ),
     cheapest AS (
-      SELECT provider AS cheapest_provider, price_class, eur_per_unit AS cheapest_eur_per_unit
+      SELECT cloud AS cheapest_cloud, geo_bucket, sku_family, unit_n, p50_ratio AS cheapest_ratio
       FROM (
-        SELECT *, row_number() OVER (PARTITION BY price_class ORDER BY eur_per_unit ASC, provider ASC) AS rn
-        FROM provider_prices
-        WHERE allow_reroute = TRUE
+        SELECT *, row_number() OVER (PARTITION BY geo_bucket, sku_family, unit_n ORDER BY p50_ratio ASC, cloud ASC) AS rn
+        FROM catalog
       )
       WHERE rn = 1
     )
     SELECT c.*,
-           pp.eur_per_unit AS current_eur_per_unit,
-           ch.cheapest_provider,
-           ch.cheapest_eur_per_unit,
-           CASE WHEN c.price_class IN ('excluded_commitment_discount', 'unpriced') THEN NULL ELSE c.billable_units * pp.eur_per_unit END AS current_cost_eur,
-           CASE WHEN c.price_class IN ('excluded_commitment_discount', 'unpriced') THEN NULL ELSE c.billable_units * ch.cheapest_eur_per_unit END AS cheapest_cost_eur,
-           CASE WHEN c.price_class IN ('excluded_commitment_discount', 'unpriced') THEN NULL ELSE greatest((c.billable_units * pp.eur_per_unit) - (c.billable_units * ch.cheapest_eur_per_unit), 0) END AS theoretical_savings_eur
-    FROM classified c
-    LEFT JOIN provider_prices pp ON c.provider = pp.provider AND c.price_class = pp.price_class
-    LEFT JOIN cheapest ch ON c.price_class = ch.price_class
+           c.cloud AS current_cloud,
+           ch.cheapest_cloud,
+           ch.cheapest_ratio,
+           CASE
+             WHEN c.sku_family = 'commitment-discount' OR c.billable_units IS NULL THEN NULL
+             ELSE c.billable_units * c.current_ratio
+           END AS current_cost_ratio_units,
+           CASE
+             WHEN c.sku_family = 'commitment-discount' OR c.billable_units IS NULL THEN NULL
+             WHEN ch.cheapest_ratio IS NOT NULL AND ch.cheapest_cloud <> c.cloud AND ch.cheapest_ratio < c.current_ratio THEN c.billable_units * ch.cheapest_ratio
+             ELSE c.billable_units * c.current_ratio
+           END AS optimized_cost_ratio_units,
+           CASE
+             WHEN c.sku_family = 'commitment-discount' OR c.billable_units IS NULL THEN NULL
+             WHEN ch.cheapest_ratio IS NOT NULL AND ch.cheapest_cloud <> c.cloud AND ch.cheapest_ratio < c.current_ratio THEN greatest((c.billable_units * c.current_ratio) - (c.billable_units * ch.cheapest_ratio), 0)
+             ELSE 0
+           END AS theoretical_savings_ratio_units
+    FROM current_priced c
+    LEFT JOIN cheapest ch USING (geo_bucket, sku_family, unit_n)
   `);
+}
+
+function ratioPriceCatalogSql(_args: Args): string {
+  return `
+    SELECT cloud,
+           geo_bucket AS geoBucket,
+           sku_family AS skuFamily,
+           unit_n AS unit,
+           round(p25_ratio, 6) AS p25Ratio,
+           round(p50_ratio, 6) AS p50Ratio,
+           round(p75_ratio, 6) AS p75Ratio,
+           source_note AS sourceNote
+    FROM price_catalog
+    ORDER BY cloud, geo_bucket, sku_family, unit_n
+  `;
 }
 
 function windowSummarySql(args: Args): string {
@@ -433,18 +343,18 @@ function windowSummarySql(args: Args): string {
            CAST(w.start_date AS VARCHAR) AS start_date,
            CAST(w.end_date AS VARCHAR) AS end_date,
            count(c.line_id) AS total_rows,
-           count(c.line_id) FILTER (WHERE c.current_cost_eur IS NOT NULL) AS priced_rows,
-           round(100.0 * count(c.line_id) FILTER (WHERE c.current_cost_eur IS NOT NULL) / nullif(count(c.line_id), 0), 2) AS priced_row_pct,
-           round(coalesce(sum(c.current_cost_eur), 0), 2) AS modeled_cost_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) * (1 - ${args.marketFluctuation}), 2) AS low_market_cost_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) * (1 + ${args.marketFluctuation}), 2) AS high_market_cost_eur,
-           round(coalesce(sum(c.theoretical_savings_eur), 0), 2) AS theoretical_savings_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) - coalesce(sum(c.theoretical_savings_eur), 0), 2) AS optimized_cost_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) / (1 - ${args.targetMargin}), 2) AS revenue_required_for_target_margin_eur,
-           round((coalesce(sum(c.current_cost_eur), 0) / (1 - ${args.targetMargin})) - coalesce(sum(c.current_cost_eur), 0), 2) AS profit_at_target_margin_eur,
-           round(100.0 * ((coalesce(sum(c.current_cost_eur), 0) / (1 - ${args.targetMargin})) - (coalesce(sum(c.current_cost_eur), 0) - coalesce(sum(c.theoretical_savings_eur), 0))) / nullif(coalesce(sum(c.current_cost_eur), 0) / (1 - ${args.targetMargin}), 0), 2) AS margin_after_savings_pct,
-           round(coalesce(sum(CASE WHEN c.price_class = 'excluded_commitment_discount' THEN c.amount ELSE 0 END), 0), 2) AS excluded_commitment_raw_amount,
-           round(coalesce(sum(CASE WHEN c.price_class = 'unpriced' THEN c.amount ELSE 0 END), 0), 2) AS unpriced_raw_amount
+           count(c.line_id) FILTER (WHERE c.catalog_p50_ratio IS NOT NULL) AS catalog_price_rows,
+           round(100.0 * count(c.line_id) FILTER (WHERE c.catalog_p50_ratio IS NOT NULL) / nullif(count(c.line_id), 0), 2) AS catalog_price_row_pct,
+           round(coalesce(sum(c.current_cost_ratio_units), 0), 2) AS modeled_cost_ratio_units,
+           round(coalesce(sum(c.current_cost_ratio_units), 0) * (1 - ${args.marketFluctuation}), 2) AS low_market_cost_ratio_units,
+           round(coalesce(sum(c.current_cost_ratio_units), 0) * (1 + ${args.marketFluctuation}), 2) AS high_market_cost_ratio_units,
+           round(coalesce(sum(c.theoretical_savings_ratio_units), 0), 2) AS theoretical_savings_ratio_units,
+           round(coalesce(sum(c.optimized_cost_ratio_units), 0), 2) AS optimized_cost_ratio_units,
+           round(coalesce(sum(c.current_cost_ratio_units), 0) / (1 - ${args.targetMargin}), 2) AS revenue_required_for_target_margin_ratio_units,
+           round((coalesce(sum(c.current_cost_ratio_units), 0) / (1 - ${args.targetMargin})) - coalesce(sum(c.current_cost_ratio_units), 0), 2) AS profit_at_target_margin_ratio_units,
+           round(100.0 * ((coalesce(sum(c.current_cost_ratio_units), 0) / (1 - ${args.targetMargin})) - coalesce(sum(c.optimized_cost_ratio_units), 0)) / nullif(coalesce(sum(c.current_cost_ratio_units), 0) / (1 - ${args.targetMargin}), 0), 2) AS margin_after_savings_pct,
+           round(coalesce(sum(CASE WHEN c.sku_family = 'commitment-discount' THEN c.amount ELSE 0 END), 0), 2) AS excluded_commitment_raw_amount,
+           round(coalesce(sum(CASE WHEN c.catalog_p50_ratio IS NULL AND c.sku_family <> 'commitment-discount' THEN c.amount ELSE 0 END), 0), 2) AS default_ratio_raw_amount
     FROM windows w
     LEFT JOIN costed c ON c.status_date::DATE >= w.start_date AND c.status_date::DATE <= w.end_date
     GROUP BY 1,2,3
@@ -456,18 +366,18 @@ function latestDaySql(args: Args): string {
   return `
     WITH bounds AS (SELECT max(status_date)::DATE AS max_date FROM costed)
     SELECT CAST(c.status_date AS VARCHAR) AS status_date,
-           c.provider,
+           c.cloud,
            count(*) AS total_rows,
-           count(*) FILTER (WHERE c.current_cost_eur IS NOT NULL) AS priced_rows,
-           round(coalesce(sum(c.current_cost_eur), 0), 2) AS modeled_cost_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) * (1 - ${args.marketFluctuation}), 2) AS low_market_cost_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) * (1 + ${args.marketFluctuation}), 2) AS high_market_cost_eur,
-           round(coalesce(sum(c.theoretical_savings_eur), 0), 2) AS theoretical_savings_eur,
-           round(coalesce(sum(c.current_cost_eur), 0) - coalesce(sum(c.theoretical_savings_eur), 0), 2) AS optimized_cost_eur
+           count(*) FILTER (WHERE c.catalog_p50_ratio IS NOT NULL) AS catalog_price_rows,
+           round(coalesce(sum(c.current_cost_ratio_units), 0), 2) AS modeled_cost_ratio_units,
+           round(coalesce(sum(c.current_cost_ratio_units), 0) * (1 - ${args.marketFluctuation}), 2) AS low_market_cost_ratio_units,
+           round(coalesce(sum(c.current_cost_ratio_units), 0) * (1 + ${args.marketFluctuation}), 2) AS high_market_cost_ratio_units,
+           round(coalesce(sum(c.theoretical_savings_ratio_units), 0), 2) AS theoretical_savings_ratio_units,
+           round(coalesce(sum(c.optimized_cost_ratio_units), 0), 2) AS optimized_cost_ratio_units
     FROM costed c
     JOIN bounds b ON c.status_date::DATE = b.max_date
     GROUP BY 1,2
-    ORDER BY modeled_cost_eur DESC
+    ORDER BY modeled_cost_ratio_units DESC
   `;
 }
 
@@ -475,17 +385,17 @@ function dailyPriceClassSql(args: Args): string {
   return `
     WITH bounds AS (SELECT max(status_date)::DATE AS max_date FROM costed)
     SELECT CAST(c.status_date::DATE AS VARCHAR) AS status_date,
-           c.provider AS current_provider,
+           c.cloud AS current_cloud,
            c.price_class,
-           c.cheapest_provider,
-           avg(c.current_eur_per_unit) AS current_eur_per_unit,
-           avg(c.cheapest_eur_per_unit) AS cheapest_eur_per_unit,
+           c.cheapest_cloud,
+           avg(c.current_ratio) AS current_ratio,
+           avg(c.cheapest_ratio) AS cheapest_ratio,
            round(sum(c.billable_units), 8) AS billable_units,
-           round(sum(c.current_cost_eur), 8) AS current_cost_eur,
-           round(sum(c.theoretical_savings_eur), 8) AS theoretical_savings_eur
+           round(sum(c.current_cost_ratio_units), 8) AS current_cost_ratio_units,
+           round(sum(c.theoretical_savings_ratio_units), 8) AS theoretical_savings_ratio_units
     FROM costed c
     JOIN bounds b ON c.status_date::DATE >= b.max_date - (${args.lookbackDays - 1} * INTERVAL 1 DAY)
-    WHERE c.current_cost_eur IS NOT NULL
+    WHERE c.current_cost_ratio_units IS NOT NULL
     GROUP BY 1,2,3,4
     ORDER BY 1,2,3
   `;
@@ -495,7 +405,7 @@ function buildForecastRows(rows: Record<string, unknown>[], lookbackDays: number
   const dates = [...new Set(rows.map((row) => String(row.status_date)))].sort();
   const keys = new Map<string, Record<string, unknown>[]>();
   for (const row of rows) {
-    const key = `${row.current_provider}|||${row.price_class}|||${row.cheapest_provider}`;
+    const key = `${row.current_cloud}|||${row.price_class}|||${row.cheapest_cloud}`;
     const list = keys.get(key) ?? [];
     list.push(row);
     keys.set(key, list);
@@ -503,10 +413,10 @@ function buildForecastRows(rows: Record<string, unknown>[], lookbackDays: number
 
   const result: ForecastRow[] = [];
   for (const [key, keyRows] of keys) {
-    const [currentProvider, priceClass, cheapestProvider] = key.split("|||");
+    const [currentCloud, priceClass, cheapestCloud] = key.split("|||");
     const byDate = new Map(keyRows.map((row) => [String(row.status_date), row]));
-    const currentUnitPrice = numberValue(keyRows.find((row) => row.current_eur_per_unit !== null)?.current_eur_per_unit);
-    const cheapestUnitPrice = numberValue(keyRows.find((row) => row.cheapest_eur_per_unit !== null)?.cheapest_eur_per_unit);
+    const currentRatio = numberValue(keyRows.find((row) => row.current_ratio !== null)?.current_ratio);
+    const cheapestRatio = numberValue(keyRows.find((row) => row.cheapest_ratio !== null)?.cheapest_ratio);
     let ewmaUnits = 0;
     let initialized = false;
     for (const date of dates.slice(-lookbackDays)) {
@@ -518,78 +428,78 @@ function buildForecastRows(rows: Record<string, unknown>[], lookbackDays: number
         ewmaUnits = alpha * units + (1 - alpha) * ewmaUnits;
       }
     }
-    const targetProvider = currentUnitPrice > cheapestUnitPrice ? cheapestProvider : currentProvider;
-    const targetUnitPrice = currentUnitPrice > cheapestUnitPrice ? cheapestUnitPrice : currentUnitPrice;
-    const currentCost = ewmaUnits * currentUnitPrice;
-    const optimizedCost = ewmaUnits * targetUnitPrice;
+    const targetCloud = currentRatio > cheapestRatio ? cheapestCloud : currentCloud;
+    const targetRatio = currentRatio > cheapestRatio ? cheapestRatio : currentRatio;
+    const currentCost = ewmaUnits * currentRatio;
+    const optimizedCost = ewmaUnits * targetRatio;
     result.push({
-      currentProvider,
-      targetProvider,
+      currentCloud,
+      targetCloud,
       priceClass,
       forecastUnits: ewmaUnits,
-      currentEurPerUnit: currentUnitPrice,
-      targetEurPerUnit: targetUnitPrice,
-      currentCostEur: currentCost,
-      optimizedCostEur: optimizedCost,
-      savingsEur: Math.max(currentCost - optimizedCost, 0),
+      currentRatio,
+      targetRatio,
+      currentCostRatioUnits: currentCost,
+      optimizedCostRatioUnits: optimizedCost,
+      savingsRatioUnits: Math.max(currentCost - optimizedCost, 0),
     });
   }
-  return result.sort((a, b) => b.savingsEur - a.savingsEur);
+  return result.sort((a, b) => b.savingsRatioUnits - a.savingsRatioUnits);
 }
 
 function buildForecastSummary(rows: ForecastRow[], args: Args): ForecastSummary {
-  const current = sum(rows.map((row) => row.currentCostEur));
-  const optimized = sum(rows.map((row) => row.optimizedCostEur));
+  const current = sum(rows.map((row) => row.currentCostRatioUnits));
+  const optimized = sum(rows.map((row) => row.optimizedCostRatioUnits));
   const savings = current - optimized;
   const revenueRequired = current / (1 - args.targetMargin);
   const optimizedMargin = revenueRequired > 0 ? ((revenueRequired - optimized) / revenueRequired) * 100 : 0;
   return {
-    forecastCurrentCostEur: round(current),
-    forecastLowMarketCostEur: round(current * (1 - args.marketFluctuation)),
-    forecastHighMarketCostEur: round(current * (1 + args.marketFluctuation)),
-    forecastOptimizedCostEur: round(optimized),
-    forecastSavingsEur: round(savings),
-    requiredRevenueFor10PctMarginEur: round(revenueRequired),
-    profitAt10PctMarginEur: round(revenueRequired - current),
+    forecastCurrentCostRatioUnits: round(current),
+    forecastLowMarketCostRatioUnits: round(current * (1 - args.marketFluctuation)),
+    forecastHighMarketCostRatioUnits: round(current * (1 + args.marketFluctuation)),
+    forecastOptimizedCostRatioUnits: round(optimized),
+    forecastSavingsRatioUnits: round(savings),
+    requiredRevenueFor10PctMarginRatioUnits: round(revenueRequired),
+    profitAt10PctMarginRatioUnits: round(revenueRequired - current),
     optimizedMarginPctIfRevenueUnchanged: round(optimizedMargin),
   };
 }
 
 function buildShareRows(rows: ForecastRow[]): ShareRow[] {
-  const providers = new Set<string>();
+  const clouds = new Set<string>();
   const currentValue = new Map<string, number>();
   const targetValue = new Map<string, number>();
   const currentCost = new Map<string, number>();
   const optimizedCost = new Map<string, number>();
 
   for (const row of rows) {
-    providers.add(row.currentProvider);
-    providers.add(row.targetProvider);
-    currentValue.set(row.currentProvider, (currentValue.get(row.currentProvider) ?? 0) + row.currentCostEur);
-    currentCost.set(row.currentProvider, (currentCost.get(row.currentProvider) ?? 0) + row.currentCostEur);
-    targetValue.set(row.targetProvider, (targetValue.get(row.targetProvider) ?? 0) + row.currentCostEur);
-    optimizedCost.set(row.targetProvider, (optimizedCost.get(row.targetProvider) ?? 0) + row.optimizedCostEur);
+    clouds.add(row.currentCloud);
+    clouds.add(row.targetCloud);
+    currentValue.set(row.currentCloud, (currentValue.get(row.currentCloud) ?? 0) + row.currentCostRatioUnits);
+    currentCost.set(row.currentCloud, (currentCost.get(row.currentCloud) ?? 0) + row.currentCostRatioUnits);
+    targetValue.set(row.targetCloud, (targetValue.get(row.targetCloud) ?? 0) + row.currentCostRatioUnits);
+    optimizedCost.set(row.targetCloud, (optimizedCost.get(row.targetCloud) ?? 0) + row.optimizedCostRatioUnits);
   }
 
   const currentValueTotal = sum([...currentValue.values()]);
   const targetValueTotal = sum([...targetValue.values()]);
   const optimizedCostTotal = sum([...optimizedCost.values()]);
-  return [...providers]
-    .map((provider) => {
-      const currentVal = currentValue.get(provider) ?? 0;
-      const targetVal = targetValue.get(provider) ?? 0;
+  return [...clouds]
+    .map((cloud) => {
+      const currentVal = currentValue.get(cloud) ?? 0;
+      const targetVal = targetValue.get(cloud) ?? 0;
       const currentShare = pct(currentVal, currentValueTotal);
       const targetShare = pct(targetVal, targetValueTotal);
       return {
-        provider,
-        currentWorkloadValueEur: round(currentVal),
+        cloud,
+        currentWorkloadValueRatioUnits: round(currentVal),
         currentWorkloadSharePct: round(currentShare),
-        targetWorkloadValueEur: round(targetVal),
+        targetWorkloadValueRatioUnits: round(targetVal),
         targetWorkloadSharePct: round(targetShare),
         workloadShareDeltaPctPoints: round(targetShare - currentShare),
-        currentCostEur: round(currentCost.get(provider) ?? 0),
-        optimizedCostEur: round(optimizedCost.get(provider) ?? 0),
-        optimizedCostSharePct: round(pct(optimizedCost.get(provider) ?? 0, optimizedCostTotal)),
+        currentCostRatioUnits: round(currentCost.get(cloud) ?? 0),
+        optimizedCostRatioUnits: round(optimizedCost.get(cloud) ?? 0),
+        optimizedCostSharePct: round(pct(optimizedCost.get(cloud) ?? 0, optimizedCostTotal)),
       };
     })
     .sort((a, b) => Math.abs(b.workloadShareDeltaPctPoints) - Math.abs(a.workloadShareDeltaPctPoints));
@@ -613,45 +523,44 @@ function buildReport(output: ReportOutput, args: Args): string {
     `- Recency window: last **${args.lookbackDays} days**, compared with previous **${args.lookbackDays} days** only.`,
     `- Target gross margin: **${formatPct(args.targetMargin * 100)}**.`,
     `- Market fluctuation band: **+/-${formatPct(args.marketFluctuation * 100)}**.`,
-    "- Prices are public-list-price assumptions converted into EUR; they are not Aiven invoices.",
-    "- Render is kept as a price reference but excluded from reroute optimization because it is PaaS, not equivalent IaaS.",
+    "- Prices are AIEVEN-style p50 ratios from `cross_cloud_list_prices.parquet`; costs are ratio-weighted units, not currency.",
+    "- Missing ratios default to 1.0, matching the AIEVEN optimizer's baseline behavior.",
     "",
     "## Recent Cost View",
-    `- Last ${args.lookbackDays} days modeled cost: **${formatMoney(last30?.modeled_cost_eur)}**; theoretical savings: **${formatMoney(last30?.theoretical_savings_eur)}**; optimized cost: **${formatMoney(last30?.optimized_cost_eur)}**.`,
-    `- Previous ${args.lookbackDays} days modeled cost: **${formatMoney(previous30?.modeled_cost_eur)}**; theoretical savings: **${formatMoney(previous30?.theoretical_savings_eur)}**.`,
-    `- Latest full month modeled cost: **${formatMoney(latestFullMonth?.modeled_cost_eur)}**; low-market case: **${formatMoney(latestFullMonth?.low_market_cost_eur)}**.`,
-    `- Month-to-date modeled cost: **${formatMoney(monthToDate?.modeled_cost_eur)}**; theoretical savings: **${formatMoney(monthToDate?.theoretical_savings_eur)}**.`,
+    `- Last ${args.lookbackDays} days modeled cost: **${formatRatioUnits(last30?.modeled_cost_ratio_units)}**; theoretical savings: **${formatRatioUnits(last30?.theoretical_savings_ratio_units)}**; optimized cost: **${formatRatioUnits(last30?.optimized_cost_ratio_units)}**.`,
+    `- Previous ${args.lookbackDays} days modeled cost: **${formatRatioUnits(previous30?.modeled_cost_ratio_units)}**; theoretical savings: **${formatRatioUnits(previous30?.theoretical_savings_ratio_units)}**.`,
+    `- Latest full month modeled cost: **${formatRatioUnits(latestFullMonth?.modeled_cost_ratio_units)}**; low-market case: **${formatRatioUnits(latestFullMonth?.low_market_cost_ratio_units)}**.`,
+    `- Month-to-date modeled cost: **${formatRatioUnits(monthToDate?.modeled_cost_ratio_units)}**; theoretical savings: **${formatRatioUnits(monthToDate?.theoretical_savings_ratio_units)}**.`,
     "",
     "## Tomorrow Forecast",
-    `- Base forecast cost: **${formatMoney(summary.forecastCurrentCostEur)}**.`,
-    `- Low market case (-${formatPct(args.marketFluctuation * 100)}): **${formatMoney(summary.forecastLowMarketCostEur)}**.`,
-    `- High market case (+${formatPct(args.marketFluctuation * 100)}): **${formatMoney(summary.forecastHighMarketCostEur)}**.`,
-    `- Required revenue for 10% gross margin: **${formatMoney(summary.requiredRevenueFor10PctMarginEur)}**.`,
-    `- Profit at 10% gross margin before changes: **${formatMoney(summary.profitAt10PctMarginEur)}**.`,
-    `- Optimized cost after recommended full reroute: **${formatMoney(summary.forecastOptimizedCostEur)}**.`,
-    `- Forecast savings: **${formatMoney(summary.forecastSavingsEur)}**.`,
+    `- Base forecast cost: **${formatRatioUnits(summary.forecastCurrentCostRatioUnits)}**.`,
+    `- Low market case (-${formatPct(args.marketFluctuation * 100)}): **${formatRatioUnits(summary.forecastLowMarketCostRatioUnits)}**.`,
+    `- High market case (+${formatPct(args.marketFluctuation * 100)}): **${formatRatioUnits(summary.forecastHighMarketCostRatioUnits)}**.`,
+    `- Required revenue-equivalent for 10% gross margin: **${formatRatioUnits(summary.requiredRevenueFor10PctMarginRatioUnits)}**.`,
+    `- Profit-equivalent at 10% gross margin before changes: **${formatRatioUnits(summary.profitAt10PctMarginRatioUnits)}**.`,
+    `- Optimized cost after recommended full reroute: **${formatRatioUnits(summary.forecastOptimizedCostRatioUnits)}**.`,
+    `- Forecast savings: **${formatRatioUnits(summary.forecastSavingsRatioUnits)}**.`,
     `- Margin after changes if revenue stays fixed: **${formatPct(summary.optimizedMarginPctIfRevenueUnchanged)}**.`,
     "",
     "## Share Changes Needed",
-    "Workload share is measured on current-cost value, because raw units mix GB, GiB-hour, VM-hours, IP-hours, and storage months.",
-    ...shareRows.map((row) => `- **${row.provider}**: ${formatPct(row.currentWorkloadSharePct)} -> ${formatPct(row.targetWorkloadSharePct)} workload-value share (${signed(row.workloadShareDeltaPctPoints)} pts); optimized cost share ${formatPct(row.optimizedCostSharePct)}.`),
+    "Workload share is measured on current ratio-weighted cost value, because raw units mix GB, GiB-hour, VM-hours, IP-hours, and storage months.",
+    ...shareRows.map((row) => `- **${row.cloud}**: ${formatPct(row.currentWorkloadSharePct)} -> ${formatPct(row.targetWorkloadSharePct)} workload-value share (${signed(row.workloadShareDeltaPctPoints)} pts); optimized cost share ${formatPct(row.optimizedCostSharePct)}.`),
     "",
     "## Top Tomorrow Moves",
-    ...topMoves.slice(0, 15).map((row) => `- Move **${row.priceClass}** from **${row.currentProvider}** to **${row.targetProvider}**: forecast units ${formatNumber(row.forecastUnits)}, cost ${formatMoney(row.currentCostEur)} -> ${formatMoney(row.optimizedCostEur)}, save **${formatMoney(row.savingsEur)}**.`),
+    ...topMoves.slice(0, 15).map((row) => `- Move **${row.priceClass}** from **${row.currentCloud}** to **${row.targetCloud}**: forecast units ${formatNumber(row.forecastUnits)}, cost ${formatRatioUnits(row.currentCostRatioUnits)} -> ${formatRatioUnits(row.optimizedCostRatioUnits)}, save **${formatRatioUnits(row.savingsRatioUnits)}**.`),
     "",
     "## Caveats",
-    "- This is not real profit margin. It estimates the revenue needed to hit a 10% target margin because Aiven customer revenue is absent.",
+    "- This is not real profit margin. It estimates the revenue-equivalent needed to hit a 10% target margin because Aiven customer revenue is absent.",
     "- The model only uses the latest recency window. It intentionally ignores older history except the previous comparable window.",
-    "- The largest savings are bandwidth-driven because UpCloud/Vultr-style pricing assumptions have bundled or very cheap transfer. That may not be operationally possible for managed database workloads.",
     "- The model ignores migration cost, compliance, latency, customer cloud preference, capacity reservations, and support obligations.",
-    "- Cloud mapping is an educated guess from billing strings. Do not publish it as fact.",
+    "- Cloud labels are anonymized IDs from the sanitized input, not public provider names.",
     "",
     "## Files",
     `- Payload: \`${path.join(args.outDir, "recent_rebalancer_payload.json")}\``,
-    `- Share changes: \`${path.join(args.outDir, "recommended_provider_share_changes.csv")}\``,
+    `- Share changes: \`${path.join(args.outDir, "recommended_cloud_share_changes.csv")}\``,
     `- Top moves: \`${path.join(args.outDir, "top_tomorrow_moves.csv")}\``,
     `- Tomorrow forecast: \`${path.join(args.outDir, "tomorrow_forecast_by_price_class.csv")}\``,
-    `- Unit price assumptions: \`${path.join(args.outDir, "tomorrow_unit_price_assumptions.csv")}\``,
+    `- Ratio price assumptions: \`${path.join(args.outDir, "tomorrow_ratio_price_assumptions.csv")}\``,
     "",
   ].join("\n");
 }
@@ -1029,15 +938,15 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
       <div>
         <p class="eyebrow">Recent-market FinOps rebalancer</p>
         <h1 id="hero-title">Tomorrow's savings, simplified.</h1>
-        <p class="lead">This report answers three questions first: current forecast cost, optimized forecast cost, and the savings worth reviewing. Supporting tables stay lower on the page.</p>
+        <p class="lead">This report answers three questions first: current forecast cost, optimized forecast cost, and the savings worth reviewing. Values are ratio-weighted units from the AIEVEN price catalog.</p>
         <ol class="guide-list" aria-label="How to read this report">
           <li><strong>1</strong><span>Start with the savings number and cost change.</span></li>
-          <li><strong>2</strong><span>Review the highest-impact moves before changing provider share.</span></li>
+          <li><strong>2</strong><span>Review the highest-impact moves before changing cloud share.</span></li>
           <li><strong>3</strong><span>Use the recent-window evidence to challenge the assumption model.</span></li>
         </ol>
         <div class="hero-actions">
           <a class="button primary" href="#moves">Review actions</a>
-          <a class="button ghost" href="recommended_provider_share_changes.csv">Download share plan</a>
+          <a class="button ghost" href="recommended_cloud_share_changes.csv">Download share plan</a>
         </div>
         <div class="hero-meta" aria-label="Run metadata">
           <span class="pill">Forecast <strong id="forecast-date">...</strong></span>
@@ -1053,7 +962,7 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
           <div>
             <span class="panel-label">Forecast savings</span>
             <strong class="hero-number" id="hero-savings">...</strong>
-            <p class="panel-copy">Modeled savings if eligible units move to the lowest equivalent public-list-price provider in this scenario.</p>
+            <p class="panel-copy">Modeled savings if eligible units move to the lowest equivalent p50-ratio cloud in this scenario.</p>
           </div>
           <div>
             <div class="meter" aria-hidden="true"><span id="savings-meter"></span></div>
@@ -1088,13 +997,13 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
     <section id="moves" aria-labelledby="moves-title">
       <div class="section-heading">
         <h2 id="moves-title">Recommended actions.</h2>
-        <p>The table is capped to the highest-impact moves so it is easier to scan. The full forecast remains in CSV and JSON.</p>
+        <p>The table is capped to the highest-impact cloud moves so it is easier to scan. The full forecast remains in CSV and JSON.</p>
       </div>
       <div class="table-card">
         <h3>Highest impact moves</h3>
         <div class="table-wrap">
           <table>
-            <caption>Top savings opportunities by price class and provider route.</caption>
+            <caption>Top savings opportunities by price class and cloud route.</caption>
             <thead><tr><th scope="col">#</th><th scope="col">Price class</th><th scope="col">Route</th><th scope="col">Forecast units</th><th scope="col">Current cost</th><th scope="col">Optimized cost</th><th scope="col">Savings</th></tr></thead>
             <tbody id="moves-table"></tbody>
           </table>
@@ -1104,8 +1013,8 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
 
     <section id="shares" aria-labelledby="shares-title">
       <div class="section-heading">
-        <h2 id="shares-title">Provider-share plan.</h2>
-        <p>Share uses current-cost value because the raw units mix hours, storage months, GB, GiB-hours, and IP-hours.</p>
+        <h2 id="shares-title">Cloud-share plan.</h2>
+        <p>Share uses current ratio-weighted cost value because the raw units mix hours, storage months, GB, GiB-hours, and IP-hours.</p>
       </div>
       <div class="split-grid">
         <div class="share-card">
@@ -1113,11 +1022,11 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
           <div class="share-list" id="share-bars"></div>
         </div>
         <div class="table-card">
-          <h3>Recommended provider share changes</h3>
+          <h3>Recommended cloud share changes</h3>
           <div class="table-wrap">
             <table>
-              <caption>Current and target workload-value share by provider.</caption>
-              <thead><tr><th scope="col">Provider</th><th scope="col">Current share</th><th scope="col">Target share</th><th scope="col">Delta</th><th scope="col">Optimized cost share</th></tr></thead>
+              <caption>Current and target workload-value share by anonymized cloud.</caption>
+              <thead><tr><th scope="col">Cloud</th><th scope="col">Current share</th><th scope="col">Target share</th><th scope="col">Delta</th><th scope="col">Optimized cost share</th></tr></thead>
               <tbody id="share-table"></tbody>
             </table>
           </div>
@@ -1135,7 +1044,7 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
 
     <section aria-labelledby="latest-title">
       <div class="section-heading">
-        <h2 id="latest-title">Latest day by provider.</h2>
+        <h2 id="latest-title">Latest day by cloud.</h2>
         <p>A quick operational pulse for the most recent date present in the local Parquet input.</p>
       </div>
       <div class="latest-grid" id="latest-day"></div>
@@ -1147,10 +1056,9 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         <h2 id="caveats-title">Assumption model, not an invoice.</h2>
         <ul>
           <li id="warning-text">${escapeHtml(output.warning)}</li>
-          <li>Public-list prices are converted to EUR and should not be treated as real Aiven bills or true gross margin.</li>
-          <li>Cloud mapping is an educated guess from billing strings. It is kept visible so assumptions can be challenged.</li>
+          <li>p50 ratios are from <code>cross_cloud_list_prices.parquet</code>; outputs are ratio-weighted units, not EUR.</li>
+          <li>Cloud labels are anonymized IDs from the sanitized input, not public provider names.</li>
           <li>The model ignores migration cost, latency, compliance constraints, reservations, customer cloud preferences, and support obligations.</li>
-          <li>Render remains a reference price source but is excluded from reroute optimization because it is PaaS, not equivalent IaaS.</li>
         </ul>
       </div>
     </section>
@@ -1172,8 +1080,8 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
       var data = JSON.parse(dataElement.textContent || "{}");
       var summary = data.forecastSummary || {};
       var scope = data.scope || {};
-      var moneyWhole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-      var moneyPrecise = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      var ratioWhole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+      var ratioPrecise = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       var numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
       var pctFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
@@ -1182,9 +1090,9 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         return Number.isFinite(n) ? n : 0;
       }
 
-      function money(value) {
+      function ratioUnits(value) {
         var n = numeric(value);
-        return "EUR " + (Math.abs(n) < 100 ? moneyPrecise : moneyWhole).format(n);
+        return (Math.abs(n) < 100 ? ratioPrecise : ratioWhole).format(n) + " ratio units";
       }
 
       function number(value) {
@@ -1243,24 +1151,24 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
 
       setText("forecast-date", scope.forecastDate || "tomorrow");
       setText("latest-date", scope.maxObservedDate || "unknown");
-      setText("hero-savings", money(summary.forecastSavingsEur));
-      setText("hero-cost", money(summary.forecastCurrentCostEur));
-      setText("hero-optimized", money(summary.forecastOptimizedCostEur));
+      setText("hero-savings", ratioUnits(summary.forecastSavingsRatioUnits));
+      setText("hero-cost", ratioUnits(summary.forecastCurrentCostRatioUnits));
+      setText("hero-optimized", ratioUnits(summary.forecastOptimizedCostRatioUnits));
       setText("hero-margin", pct(summary.optimizedMarginPctIfRevenueUnchanged));
 
-      var savingsRate = numeric(summary.forecastCurrentCostEur) > 0
-        ? (numeric(summary.forecastSavingsEur) / numeric(summary.forecastCurrentCostEur)) * 100
+      var savingsRate = numeric(summary.forecastCurrentCostRatioUnits) > 0
+        ? (numeric(summary.forecastSavingsRatioUnits) / numeric(summary.forecastCurrentCostRatioUnits)) * 100
         : 0;
       var meter = document.getElementById("savings-meter");
       if (meter) meter.style.width = Math.min(100, Math.max(0, savingsRate)).toFixed(2) + "%";
       setText("savings-rate", pct(savingsRate));
-      setText("decision-note", "Review " + money(summary.forecastSavingsEur) + " of modeled savings before changing provider share. This is an assumption model, so validate the top actions against latency, compliance, capacity, and customer preference.");
+      setText("decision-note", "Review " + ratioUnits(summary.forecastSavingsRatioUnits) + " of modeled savings before changing cloud share. This is an assumption model, so validate the top actions against latency, compliance, capacity, and customer preference.");
 
       var summaryCards = document.getElementById("summary-cards");
       if (summaryCards) {
-        appendMetric(summaryCards, "Current forecast", money(summary.forecastCurrentCostEur), "Tomorrow's modeled cost before recommended changes.", false);
-        appendMetric(summaryCards, "After recommendation", money(summary.forecastOptimizedCostEur), "Modeled cost after eligible reroutes.", false);
-        appendMetric(summaryCards, "Savings to review", money(summary.forecastSavingsEur), pct(savingsRate) + " of the base forecast cost.", true);
+        appendMetric(summaryCards, "Current forecast", ratioUnits(summary.forecastCurrentCostRatioUnits), "Tomorrow's modeled cost before recommended changes.", false);
+        appendMetric(summaryCards, "After recommendation", ratioUnits(summary.forecastOptimizedCostRatioUnits), "Modeled cost after eligible reroutes.", false);
+        appendMetric(summaryCards, "Savings to review", ratioUnits(summary.forecastSavingsRatioUnits), pct(savingsRate) + " of the base forecast cost.", true);
       }
 
       var windowCards = document.getElementById("window-cards");
@@ -1271,10 +1179,10 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         var dl = document.createElement("dl");
         [
           ["Dates", String(row.start_date || "") + " to " + String(row.end_date || "")],
-          ["Modeled cost", money(row.modeled_cost_eur)],
-          ["Optimized", money(row.optimized_cost_eur)],
-          ["Savings", money(row.theoretical_savings_eur)],
-          ["Priced rows", pct(row.priced_row_pct)]
+          ["Modeled cost", ratioUnits(row.modeled_cost_ratio_units)],
+          ["Optimized", ratioUnits(row.optimized_cost_ratio_units)],
+          ["Savings", ratioUnits(row.theoretical_savings_ratio_units)],
+          ["Catalog rows", pct(row.catalog_price_row_pct)]
         ].forEach(function (pair) {
           var line = document.createElement("div");
           line.appendChild(create("dt", "", pair[0]));
@@ -1291,12 +1199,12 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         if (shareBars) {
           var item = create("article", "");
           var top = create("div", "share-row-top");
-          top.appendChild(create("strong", "", String(row.provider || "Unknown")));
+          top.appendChild(create("strong", "", String(row.cloud || "Unknown")));
           top.appendChild(create("span", "", signedPctPoints(row.workloadShareDeltaPctPoints) + " pts"));
           item.appendChild(top);
           var bar = create("div", "share-meter");
           bar.setAttribute("role", "img");
-          bar.setAttribute("aria-label", String(row.provider || "Unknown") + " target share " + pct(row.targetWorkloadSharePct) + ", change " + signedPctPoints(row.workloadShareDeltaPctPoints) + " points");
+          bar.setAttribute("aria-label", String(row.cloud || "Unknown") + " target share " + pct(row.targetWorkloadSharePct) + ", change " + signedPctPoints(row.workloadShareDeltaPctPoints) + " points");
           var fill = document.createElement("span");
           fill.style.width = Math.min(100, Math.max(0, numeric(row.targetWorkloadSharePct))).toFixed(2) + "%";
           bar.appendChild(fill);
@@ -1306,7 +1214,7 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         }
         if (shareTable) {
           appendTableRow(shareTable, [
-            String(row.provider || "Unknown"),
+            String(row.cloud || "Unknown"),
             pct(row.currentWorkloadSharePct),
             pct(row.targetWorkloadSharePct),
             signedPctPoints(row.workloadShareDeltaPctPoints) + " pts",
@@ -1321,11 +1229,11 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
         appendTableRow(movesTable, [
           String(index + 1),
           String(row.priceClass || ""),
-          String(row.currentProvider || "") + " -> " + String(row.targetProvider || ""),
+          String(row.currentCloud || "") + " -> " + String(row.targetCloud || ""),
           number(row.forecastUnits),
-          money(row.currentCostEur),
-          money(row.optimizedCostEur),
-          money(row.savingsEur)
+          ratioUnits(row.currentCostRatioUnits),
+          ratioUnits(row.optimizedCostRatioUnits),
+          ratioUnits(row.savingsRatioUnits)
         ]);
       });
 
@@ -1333,9 +1241,9 @@ function buildHtmlReport(output: ReportOutput, args: Args): string {
       (data.latestDay || []).slice(0, 4).forEach(function (row) {
         if (!latest) return;
         var card = create("article", "latest-card");
-        card.appendChild(create("span", "", String(row.provider || "Unknown provider")));
-        card.appendChild(create("strong", "", money(row.modeled_cost_eur)));
-        card.appendChild(create("p", "share-caption", "Optimized " + money(row.optimized_cost_eur) + ", savings " + money(row.theoretical_savings_eur)));
+        card.appendChild(create("span", "", String(row.cloud || "Unknown cloud")));
+        card.appendChild(create("strong", "", ratioUnits(row.modeled_cost_ratio_units)));
+        card.appendChild(create("p", "share-caption", "Optimized " + ratioUnits(row.optimized_cost_ratio_units) + ", savings " + ratioUnits(row.theoretical_savings_ratio_units)));
         latest.appendChild(card);
       });
     })();
@@ -1397,10 +1305,6 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-function sqlTuple(values: unknown[]): string {
-  return `(${values.map(sqlValue).join(",")})`;
-}
-
 function sqlValue(value: unknown): string {
   if (typeof value === "string") return `'${sqlString(value)}'`;
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
@@ -1411,6 +1315,19 @@ function sqlValue(value: unknown): string {
 
 function sqlString(value: string): string {
   return value.replaceAll("'", "''");
+}
+
+function normalizedUnitSql(column: string): string {
+  return `CASE ${column}
+    WHEN 'gib' THEN 'gb'
+    WHEN 'gib-hour' THEN 'hour'
+    WHEN 'gib-month' THEN 'month'
+    WHEN 'gb-month' THEN 'month'
+    WHEN 'vcpu-hours' THEN 'hour'
+    WHEN 'lcu-hrs' THEN 'hour'
+    WHEN '1/hour' THEN 'hour'
+    ELSE ${column}
+  END`;
 }
 
 function numberValue(value: unknown): number {
@@ -1432,8 +1349,8 @@ function round(value: number, decimals = 2): number {
   return Math.round((value + Number.EPSILON) * factor) / factor;
 }
 
-function formatMoney(value: unknown): string {
-  return `EUR ${formatNumber(numberValue(value))}`;
+function formatRatioUnits(value: unknown): string {
+  return `${formatNumber(numberValue(value))} ratio units`;
 }
 
 function formatNumber(value: unknown): string {
