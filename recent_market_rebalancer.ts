@@ -47,6 +47,36 @@ type ShareRow = {
   optimizedCostSharePct: number;
 };
 
+type ForecastSummary = {
+  forecastCurrentCostEur: number;
+  forecastLowMarketCostEur: number;
+  forecastHighMarketCostEur: number;
+  forecastOptimizedCostEur: number;
+  forecastSavingsEur: number;
+  requiredRevenueFor10PctMarginEur: number;
+  profitAt10PctMarginEur: number;
+  optimizedMarginPctIfRevenueUnchanged: number;
+};
+
+type ReportOutput = {
+  generatedAt: string;
+  scope: {
+    maxObservedDate: string;
+    forecastDate: string;
+    lookbackDays: number;
+    targetMargin: number;
+    marketFluctuation: number;
+    ewmaAlpha: number;
+  };
+  warning: string;
+  forecastSummary: ForecastSummary;
+  recommendedShareChanges: ShareRow[];
+  topMoves: ForecastRow[];
+  tomorrowForecast: ForecastRow[];
+  windowSummary: Record<string, unknown>[];
+  latestDay: Record<string, unknown>[];
+};
+
 type Args = {
   dataDir: string;
   outDir: string;
@@ -248,7 +278,7 @@ async function main() {
     sourceNote: row.sourceNote,
   }));
 
-  const output = {
+  const output: ReportOutput = {
     generatedAt: new Date().toISOString(),
     scope: {
       maxObservedDate: maxDate,
@@ -262,9 +292,15 @@ async function main() {
     forecastSummary: summary,
     recommendedShareChanges: shareRows,
     topMoves,
+    tomorrowForecast: forecastRows,
     windowSummary,
     latestDay,
   };
+
+  const markdownReportPath = path.join(args.outDir, "recent_market_rebalancer_report.md");
+  const htmlReportPath = path.join(args.outDir, "recent_market_rebalancer_report.html");
+  const htmlIndexPath = path.join(args.outDir, "index.html");
+  const htmlReport = buildHtmlReport(output, args);
 
   await writeCsv(path.join(args.outDir, "recent_window_summary.csv"), windowSummary);
   await writeCsv(path.join(args.outDir, "latest_day_by_provider.csv"), latestDay);
@@ -274,11 +310,14 @@ async function main() {
   await writeCsv(path.join(args.outDir, "tomorrow_unit_price_assumptions.csv"), providerPricesForTomorrow);
   await writeCsv(path.join(args.outDir, "cloud_mapping_assumptions_ts.csv"), cloudMap);
   await writeFile(path.join(args.outDir, "recent_rebalancer_payload.json"), JSON.stringify(output, jsonReplacer, 2), "utf8");
-  await writeFile(path.join(args.outDir, "recent_market_rebalancer_report.md"), buildReport(output, args), "utf8");
+  await writeFile(markdownReportPath, buildReport(output, args), "utf8");
+  await writeFile(htmlReportPath, htmlReport, "utf8");
+  await writeFile(htmlIndexPath, htmlReport, "utf8");
 
   console.log("Created recent-market TypeScript rebalancing report");
   console.log(`Output folder: ${args.outDir}`);
-  console.log(`Report: ${path.join(args.outDir, "recent_market_rebalancer_report.md")}`);
+  console.log(`Markdown report: ${markdownReportPath}`);
+  console.log(`HTML website: ${htmlReportPath}`);
   console.log(`Forecast date: ${tomorrow}`);
   console.log(`Forecast base cost EUR: ${formatMoney(summary.forecastCurrentCostEur)}`);
   console.log(`Forecast optimized cost EUR: ${formatMoney(summary.forecastOptimizedCostEur)}`);
@@ -498,7 +537,7 @@ function buildForecastRows(rows: Record<string, unknown>[], lookbackDays: number
   return result.sort((a, b) => b.savingsEur - a.savingsEur);
 }
 
-function buildForecastSummary(rows: ForecastRow[], args: Args) {
+function buildForecastSummary(rows: ForecastRow[], args: Args): ForecastSummary {
   const current = sum(rows.map((row) => row.currentCostEur));
   const optimized = sum(rows.map((row) => row.optimizedCostEur));
   const savings = current - optimized;
@@ -556,7 +595,7 @@ function buildShareRows(rows: ForecastRow[]): ShareRow[] {
     .sort((a, b) => Math.abs(b.workloadShareDeltaPctPoints) - Math.abs(a.workloadShareDeltaPctPoints));
 }
 
-function buildReport(output: any, args: Args): string {
+function buildReport(output: ReportOutput, args: Args): string {
   const summary = output.forecastSummary;
   const last30 = output.windowSummary.find((row: any) => row.window_name === "last_30_days");
   const previous30 = output.windowSummary.find((row: any) => row.window_name === "previous_30_days");
@@ -615,6 +654,729 @@ function buildReport(output: any, args: Args): string {
     `- Unit price assumptions: \`${path.join(args.outDir, "tomorrow_unit_price_assumptions.csv")}\``,
     "",
   ].join("\n");
+}
+
+function buildHtmlReport(output: ReportOutput, args: Args): string {
+  const dataJson = safeJsonForScript(JSON.stringify(output, jsonReplacer) ?? "{}");
+  const generatedAt = escapeHtml(formatGeneratedAt(output.generatedAt));
+  const lookbackDays = escapeHtml(args.lookbackDays);
+  const targetMargin = escapeHtml(formatPct(args.targetMargin * 100));
+  const marketFluctuation = escapeHtml(formatPct(args.marketFluctuation * 100));
+
+  return String.raw`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tinyfinance Recent Market Rebalancer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #06111f;
+      --bg-2: #0a1728;
+      --surface: rgba(13, 29, 48, 0.88);
+      --surface-strong: #10223a;
+      --surface-soft: rgba(255, 255, 255, 0.06);
+      --text: #f6f8ff;
+      --muted: #aab8cc;
+      --line: rgba(210, 226, 255, 0.16);
+      --green: #c7ff4f;
+      --green-strong: #9cff00;
+      --blue: #80d7ff;
+      --pink: #ff8fd4;
+      --orange: #ffbf69;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius: 28px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 8% 8%, rgba(128, 215, 255, 0.22), transparent 34rem),
+        radial-gradient(circle at 92% 0%, rgba(199, 255, 79, 0.2), transparent 28rem),
+        linear-gradient(180deg, var(--bg), #030914 58%, #020711);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    :focus-visible {
+      outline: 3px solid #ffffff;
+      outline-offset: 4px;
+    }
+
+    .skip-link {
+      position: absolute;
+      left: 16px;
+      top: 12px;
+      z-index: 40;
+      transform: translateY(-160%);
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: #ffffff;
+      color: #06111f;
+      font-weight: 900;
+      transition: transform 180ms ease;
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .page-shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+
+    .site-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(6, 17, 31, 0.82);
+      backdrop-filter: blur(22px);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      min-height: 76px;
+    }
+
+    .brand { display: inline-flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -0.03em; }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--green), var(--blue));
+      color: #06111f;
+      box-shadow: 0 14px 32px rgba(156, 255, 0, 0.2);
+      text-transform: uppercase;
+    }
+
+    .nav-links { display: flex; gap: 22px; color: var(--muted); font-size: 0.95rem; }
+    .nav-links a:hover { color: var(--text); }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 18px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+    }
+
+    .button.primary { background: var(--green); color: #06111f; box-shadow: 0 14px 34px rgba(156, 255, 0, 0.22); }
+    .button.ghost { border-color: var(--line); color: var(--text); background: rgba(255, 255, 255, 0.04); }
+    .button.primary:hover { background: #d6ff7a; }
+    .button.ghost:hover { background: rgba(255, 255, 255, 0.09); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.75fr);
+      gap: 28px;
+      align-items: stretch;
+      padding: 82px 0 46px;
+    }
+
+    .eyebrow {
+      margin: 0 0 16px;
+      color: var(--green);
+      font-size: 0.78rem;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 840px;
+      margin-bottom: 20px;
+      font-size: clamp(3rem, 6.6vw, 5.7rem);
+      line-height: 0.94;
+      letter-spacing: -0.07em;
+      text-wrap: balance;
+    }
+
+    .lead { max-width: 690px; margin-bottom: 28px; color: #d7e0f0; font-size: clamp(1.08rem, 2.4vw, 1.35rem); }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 26px; }
+
+    .guide-list {
+      display: grid;
+      gap: 10px;
+      max-width: 680px;
+      margin: 0 0 26px;
+      padding: 0;
+      list-style: none;
+      color: #dce6f4;
+    }
+
+    .guide-list li {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .guide-list strong {
+      display: inline-grid;
+      flex: 0 0 auto;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--green);
+      color: #06111f;
+      font-size: 0.86rem;
+    }
+
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); }
+    .pill { display: inline-flex; gap: 8px; align-items: center; padding: 9px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
+    .pill strong { color: var(--text); }
+
+    .hero-card {
+      position: relative;
+      overflow: hidden;
+      min-height: 530px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 8px);
+      background:
+        linear-gradient(180deg, rgba(128, 215, 255, 0.15), transparent 42%),
+        linear-gradient(135deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03));
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: auto -20% -34% 18%;
+      height: 280px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(199, 255, 79, 0.35), transparent 62%);
+      filter: blur(6px);
+    }
+
+    .forecast-panel { position: relative; z-index: 1; display: grid; gap: 18px; }
+    .panel-label { color: var(--muted); font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.12em; }
+    .hero-number { display: block; margin: 8px 0 2px; font-size: clamp(2.6rem, 8vw, 5.1rem); line-height: 0.92; letter-spacing: -0.075em; }
+    .panel-copy { color: #d5deec; }
+
+    .meter { height: 12px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+    .meter span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--green), var(--blue)); transition: width 700ms ease; }
+
+    .mini-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .mini-card { padding: 18px; border: 1px solid var(--line); border-radius: 22px; background: rgba(6, 17, 31, 0.72); }
+    .mini-card span { display: block; color: var(--muted); font-size: 0.85rem; }
+    .mini-card strong { display: block; margin-top: 8px; font-size: 1.2rem; letter-spacing: -0.03em; }
+
+    .trust-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+    }
+
+    .trust-strip span { padding: 9px 14px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); color: #dfe8f7; }
+
+    .decision-note {
+      margin-bottom: 18px;
+      padding: 18px 20px;
+      border: 1px solid rgba(199, 255, 79, 0.35);
+      border-radius: 22px;
+      background: rgba(199, 255, 79, 0.08);
+      color: #efffce;
+      font-weight: 800;
+    }
+
+    section { padding: 52px 0; }
+    .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+    .section-heading h2 { margin-bottom: 0; max-width: 760px; font-size: clamp(2rem, 5vw, 4.3rem); line-height: 0.95; letter-spacing: -0.065em; }
+    .section-heading p { max-width: 440px; margin-bottom: 0; color: var(--muted); }
+
+    .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .metric-card, .window-card, .share-card, .table-card, .caveat-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 20px 55px rgba(0, 0, 0, 0.18);
+    }
+
+    .metric-card { min-height: 190px; padding: 24px; }
+    .metric-card .label { color: var(--muted); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.75rem; }
+    .metric-card .value { display: block; margin: 18px 0 12px; font-size: clamp(1.9rem, 4vw, 3.1rem); line-height: 1; letter-spacing: -0.06em; }
+    .metric-card .detail { color: #c2cee0; }
+    .metric-card.accent { background: linear-gradient(135deg, rgba(199, 255, 79, 0.18), rgba(128, 215, 255, 0.08)), var(--surface); }
+
+    .window-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+    .window-card { padding: 22px; }
+    .window-card h3 { margin-bottom: 14px; font-size: 1.25rem; letter-spacing: -0.03em; }
+    .window-card dl { display: grid; gap: 12px; margin: 0; }
+    .window-card div { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .window-card dt { color: var(--muted); }
+    .window-card dd { margin: 0; text-align: right; font-weight: 800; }
+
+    .split-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 18px; align-items: start; }
+    .share-card { padding: 22px; }
+    .share-list { display: grid; gap: 14px; }
+    .share-row-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 9px; }
+    .share-row-top span { color: var(--muted); }
+    .share-meter { position: relative; height: 12px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+    .share-meter span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--green), var(--blue)); }
+    .share-caption { margin-top: 8px; color: var(--muted); font-size: 0.9rem; }
+
+    .table-card { overflow: hidden; }
+    .table-card h3 { margin: 0; padding: 22px 22px 0; }
+    .table-wrap { overflow-x: auto; }
+    caption { padding: 0 22px 12px; color: var(--muted); text-align: left; }
+    table { width: 100%; border-collapse: collapse; min-width: 720px; }
+    th, td { padding: 15px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.12em; text-transform: uppercase; }
+    td { color: #e5edf8; }
+    td:last-child, th:last-child { text-align: right; }
+    tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+
+    .latest-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .latest-card { padding: 18px; border: 1px solid var(--line); border-radius: 22px; background: rgba(255, 255, 255, 0.05); }
+    .latest-card span { display: block; color: var(--muted); }
+    .latest-card strong { display: block; margin-top: 8px; font-size: 1.25rem; letter-spacing: -0.03em; }
+
+    .caveat-card { padding: 28px; background: linear-gradient(135deg, rgba(255, 143, 212, 0.12), rgba(128, 215, 255, 0.07)), var(--surface); }
+    .caveat-card ul { display: grid; gap: 10px; margin: 0; padding-left: 20px; color: #d8e2f0; }
+
+    .site-footer { padding: 36px 0 54px; color: var(--muted); }
+    .site-footer .page-shell { display: flex; justify-content: space-between; gap: 18px; border-top: 1px solid var(--line); padding-top: 24px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .hero, .split-grid { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .window-grid, .latest-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nav-links { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      .page-shell { width: min(100% - 22px, 1180px); }
+      .nav { min-height: 68px; }
+      .button.ghost { display: none; }
+      .hero { padding-top: 48px; }
+      .hero-card { min-height: auto; }
+      .mini-grid, .metric-grid, .window-grid, .latest-grid { grid-template-columns: 1fr; }
+      .section-heading { display: block; }
+      h1 { font-size: clamp(2.85rem, 14vw, 4.5rem); }
+      table { min-width: 640px; }
+      .site-footer .page-shell { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to report content</a>
+  <header class="site-header">
+    <div class="page-shell nav">
+      <a class="brand" href="#main" aria-label="Tinyfinance home"><span class="brand-mark">tf</span><span>Tinyfinance</span></a>
+      <nav class="nav-links" aria-label="Report sections">
+        <a href="#summary">Overview</a>
+        <a href="#moves">Actions</a>
+        <a href="#shares">Share plan</a>
+        <a href="#windows">Evidence</a>
+      </nav>
+      <a class="button ghost" href="recent_rebalancer_payload.json">Payload JSON</a>
+    </div>
+  </header>
+
+  <main id="main" class="page-shell" tabindex="-1">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">Recent-market FinOps rebalancer</p>
+        <h1 id="hero-title">Tomorrow's savings, simplified.</h1>
+        <p class="lead">This report answers three questions first: current forecast cost, optimized forecast cost, and the savings worth reviewing. Supporting tables stay lower on the page.</p>
+        <ol class="guide-list" aria-label="How to read this report">
+          <li><strong>1</strong><span>Start with the savings number and cost change.</span></li>
+          <li><strong>2</strong><span>Review the highest-impact moves before changing provider share.</span></li>
+          <li><strong>3</strong><span>Use the recent-window evidence to challenge the assumption model.</span></li>
+        </ol>
+        <div class="hero-actions">
+          <a class="button primary" href="#moves">Review actions</a>
+          <a class="button ghost" href="recommended_provider_share_changes.csv">Download share plan</a>
+        </div>
+        <div class="hero-meta" aria-label="Run metadata">
+          <span class="pill">Forecast <strong id="forecast-date">...</strong></span>
+          <span class="pill">Observed through <strong id="latest-date">...</strong></span>
+          <span class="pill">Window <strong>${lookbackDays} days</strong></span>
+          <span class="pill">Target margin <strong>${targetMargin}</strong></span>
+          <span class="pill">Market band <strong>+/-${marketFluctuation}</strong></span>
+        </div>
+      </div>
+
+      <aside class="hero-card" aria-label="Forecast savings summary">
+        <div class="forecast-panel">
+          <div>
+            <span class="panel-label">Forecast savings</span>
+            <strong class="hero-number" id="hero-savings">...</strong>
+            <p class="panel-copy">Modeled savings if eligible units move to the lowest equivalent public-list-price provider in this scenario.</p>
+          </div>
+          <div>
+            <div class="meter" aria-hidden="true"><span id="savings-meter"></span></div>
+            <p class="share-caption"><span id="savings-rate">...</span> of base forecast cost.</p>
+          </div>
+          <div class="mini-grid">
+            <div class="mini-card"><span>Base forecast</span><strong id="hero-cost">...</strong></div>
+            <div class="mini-card"><span>Optimized cost</span><strong id="hero-optimized">...</strong></div>
+            <div class="mini-card"><span>Margin after changes</span><strong id="hero-margin">...</strong></div>
+            <div class="mini-card"><span>Generated</span><strong>${generatedAt}</strong></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <div class="trust-strip" aria-label="Data pipeline badges">
+      <span>DuckDB SQL</span>
+      <span>Local Parquet</span>
+      <span>Browser-rendered summary</span>
+      <span>WCAG-aware layout</span>
+    </div>
+
+    <section id="summary" aria-labelledby="summary-title">
+      <div class="section-heading">
+        <h2 id="summary-title">The short answer.</h2>
+        <p>Three cards, one decision note. Detail stays available without competing with the recommendation.</p>
+      </div>
+      <p class="decision-note" id="decision-note">Loading recommendation...</p>
+      <div class="metric-grid" id="summary-cards"></div>
+    </section>
+
+    <section id="moves" aria-labelledby="moves-title">
+      <div class="section-heading">
+        <h2 id="moves-title">Recommended actions.</h2>
+        <p>The table is capped to the highest-impact moves so it is easier to scan. The full forecast remains in CSV and JSON.</p>
+      </div>
+      <div class="table-card">
+        <h3>Highest impact moves</h3>
+        <div class="table-wrap">
+          <table>
+            <caption>Top savings opportunities by price class and provider route.</caption>
+            <thead><tr><th scope="col">#</th><th scope="col">Price class</th><th scope="col">Route</th><th scope="col">Forecast units</th><th scope="col">Current cost</th><th scope="col">Optimized cost</th><th scope="col">Savings</th></tr></thead>
+            <tbody id="moves-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="shares" aria-labelledby="shares-title">
+      <div class="section-heading">
+        <h2 id="shares-title">Provider-share plan.</h2>
+        <p>Share uses current-cost value because the raw units mix hours, storage months, GB, GiB-hours, and IP-hours.</p>
+      </div>
+      <div class="split-grid">
+        <div class="share-card">
+          <h3>Target workload share</h3>
+          <div class="share-list" id="share-bars"></div>
+        </div>
+        <div class="table-card">
+          <h3>Recommended provider share changes</h3>
+          <div class="table-wrap">
+            <table>
+              <caption>Current and target workload-value share by provider.</caption>
+              <thead><tr><th scope="col">Provider</th><th scope="col">Current share</th><th scope="col">Target share</th><th scope="col">Delta</th><th scope="col">Optimized cost share</th></tr></thead>
+              <tbody id="share-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="windows" aria-labelledby="windows-title">
+      <div class="section-heading">
+        <h2 id="windows-title">Evidence windows.</h2>
+        <p>The model uses only recent windows: last recency window, previous comparable window, latest full month, and month-to-date.</p>
+      </div>
+      <div class="window-grid" id="window-cards"></div>
+    </section>
+
+    <section aria-labelledby="latest-title">
+      <div class="section-heading">
+        <h2 id="latest-title">Latest day by provider.</h2>
+        <p>A quick operational pulse for the most recent date present in the local Parquet input.</p>
+      </div>
+      <div class="latest-grid" id="latest-day"></div>
+    </section>
+
+    <section aria-labelledby="caveats-title">
+      <div class="caveat-card">
+        <p class="eyebrow">Model caveats</p>
+        <h2 id="caveats-title">Assumption model, not an invoice.</h2>
+        <ul>
+          <li id="warning-text">${escapeHtml(output.warning)}</li>
+          <li>Public-list prices are converted to EUR and should not be treated as real Aiven bills or true gross margin.</li>
+          <li>Cloud mapping is an educated guess from billing strings. It is kept visible so assumptions can be challenged.</li>
+          <li>The model ignores migration cost, latency, compliance constraints, reservations, customer cloud preferences, and support obligations.</li>
+          <li>Render remains a reference price source but is excluded from reroute optimization because it is PaaS, not equivalent IaaS.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="page-shell">
+      <span>Tinyfinance recent-market rebalancer</span>
+      <span>Accessibility pass: clear headings, keyboard focus, contrast, captions, and reduced motion.</span>
+    </div>
+  </footer>
+
+  <script type="application/json" id="rebalancer-data">${dataJson}</script>
+  <script>
+    (function () {
+      var dataElement = document.getElementById("rebalancer-data");
+      if (!dataElement) return;
+
+      var data = JSON.parse(dataElement.textContent || "{}");
+      var summary = data.forecastSummary || {};
+      var scope = data.scope || {};
+      var moneyWhole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+      var moneyPrecise = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      var numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+      var pctFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+
+      function numeric(value) {
+        var n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      function money(value) {
+        var n = numeric(value);
+        return "EUR " + (Math.abs(n) < 100 ? moneyPrecise : moneyWhole).format(n);
+      }
+
+      function number(value) {
+        return numberFormat.format(numeric(value));
+      }
+
+      function pct(value) {
+        return pctFormat.format(numeric(value)) + "%";
+      }
+
+      function signedPctPoints(value) {
+        var n = numeric(value);
+        return (n >= 0 ? "+" : "") + pct(n);
+      }
+
+      function setText(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
+
+      function create(tag, className, text) {
+        var el = document.createElement(tag);
+        if (className) el.className = className;
+        if (text !== undefined) el.textContent = text;
+        return el;
+      }
+
+      function appendMetric(container, label, value, detail, accent) {
+        var card = create("article", "metric-card" + (accent ? " accent" : ""));
+        card.appendChild(create("span", "label", label));
+        card.appendChild(create("strong", "value", value));
+        card.appendChild(create("p", "detail", detail));
+        container.appendChild(card);
+      }
+
+      function appendTableRow(tbody, values) {
+        var tr = document.createElement("tr");
+        values.forEach(function (value) {
+          var td = document.createElement("td");
+          td.textContent = value;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      }
+
+      function windowTitle(name) {
+        var lookback = numeric(scope.lookbackDays) || ${Number(args.lookbackDays)};
+        var titles = {
+          last_30_days: "Last " + lookback + " days",
+          previous_30_days: "Previous " + lookback + " days",
+          latest_full_month: "Latest full month",
+          month_to_date: "Month to date"
+        };
+        return titles[name] || String(name || "Window").replace(/_/g, " ");
+      }
+
+      setText("forecast-date", scope.forecastDate || "tomorrow");
+      setText("latest-date", scope.maxObservedDate || "unknown");
+      setText("hero-savings", money(summary.forecastSavingsEur));
+      setText("hero-cost", money(summary.forecastCurrentCostEur));
+      setText("hero-optimized", money(summary.forecastOptimizedCostEur));
+      setText("hero-margin", pct(summary.optimizedMarginPctIfRevenueUnchanged));
+
+      var savingsRate = numeric(summary.forecastCurrentCostEur) > 0
+        ? (numeric(summary.forecastSavingsEur) / numeric(summary.forecastCurrentCostEur)) * 100
+        : 0;
+      var meter = document.getElementById("savings-meter");
+      if (meter) meter.style.width = Math.min(100, Math.max(0, savingsRate)).toFixed(2) + "%";
+      setText("savings-rate", pct(savingsRate));
+      setText("decision-note", "Review " + money(summary.forecastSavingsEur) + " of modeled savings before changing provider share. This is an assumption model, so validate the top actions against latency, compliance, capacity, and customer preference.");
+
+      var summaryCards = document.getElementById("summary-cards");
+      if (summaryCards) {
+        appendMetric(summaryCards, "Current forecast", money(summary.forecastCurrentCostEur), "Tomorrow's modeled cost before recommended changes.", false);
+        appendMetric(summaryCards, "After recommendation", money(summary.forecastOptimizedCostEur), "Modeled cost after eligible reroutes.", false);
+        appendMetric(summaryCards, "Savings to review", money(summary.forecastSavingsEur), pct(savingsRate) + " of the base forecast cost.", true);
+      }
+
+      var windowCards = document.getElementById("window-cards");
+      (data.windowSummary || []).forEach(function (row) {
+        if (!windowCards) return;
+        var card = create("article", "window-card");
+        card.appendChild(create("h3", "", windowTitle(row.window_name)));
+        var dl = document.createElement("dl");
+        [
+          ["Dates", String(row.start_date || "") + " to " + String(row.end_date || "")],
+          ["Modeled cost", money(row.modeled_cost_eur)],
+          ["Optimized", money(row.optimized_cost_eur)],
+          ["Savings", money(row.theoretical_savings_eur)],
+          ["Priced rows", pct(row.priced_row_pct)]
+        ].forEach(function (pair) {
+          var line = document.createElement("div");
+          line.appendChild(create("dt", "", pair[0]));
+          line.appendChild(create("dd", "", pair[1]));
+          dl.appendChild(line);
+        });
+        card.appendChild(dl);
+        windowCards.appendChild(card);
+      });
+
+      var shareBars = document.getElementById("share-bars");
+      var shareTable = document.getElementById("share-table");
+      (data.recommendedShareChanges || []).forEach(function (row) {
+        if (shareBars) {
+          var item = create("article", "");
+          var top = create("div", "share-row-top");
+          top.appendChild(create("strong", "", String(row.provider || "Unknown")));
+          top.appendChild(create("span", "", signedPctPoints(row.workloadShareDeltaPctPoints) + " pts"));
+          item.appendChild(top);
+          var bar = create("div", "share-meter");
+          bar.setAttribute("role", "img");
+          bar.setAttribute("aria-label", String(row.provider || "Unknown") + " target share " + pct(row.targetWorkloadSharePct) + ", change " + signedPctPoints(row.workloadShareDeltaPctPoints) + " points");
+          var fill = document.createElement("span");
+          fill.style.width = Math.min(100, Math.max(0, numeric(row.targetWorkloadSharePct))).toFixed(2) + "%";
+          bar.appendChild(fill);
+          item.appendChild(bar);
+          item.appendChild(create("p", "share-caption", "Current " + pct(row.currentWorkloadSharePct) + " -> target " + pct(row.targetWorkloadSharePct)));
+          shareBars.appendChild(item);
+        }
+        if (shareTable) {
+          appendTableRow(shareTable, [
+            String(row.provider || "Unknown"),
+            pct(row.currentWorkloadSharePct),
+            pct(row.targetWorkloadSharePct),
+            signedPctPoints(row.workloadShareDeltaPctPoints) + " pts",
+            pct(row.optimizedCostSharePct)
+          ]);
+        }
+      });
+
+      var movesTable = document.getElementById("moves-table");
+      (data.topMoves || []).slice(0, 8).forEach(function (row, index) {
+        if (!movesTable) return;
+        appendTableRow(movesTable, [
+          String(index + 1),
+          String(row.priceClass || ""),
+          String(row.currentProvider || "") + " -> " + String(row.targetProvider || ""),
+          number(row.forecastUnits),
+          money(row.currentCostEur),
+          money(row.optimizedCostEur),
+          money(row.savingsEur)
+        ]);
+      });
+
+      var latest = document.getElementById("latest-day");
+      (data.latestDay || []).slice(0, 4).forEach(function (row) {
+        if (!latest) return;
+        var card = create("article", "latest-card");
+        card.appendChild(create("span", "", String(row.provider || "Unknown provider")));
+        card.appendChild(create("strong", "", money(row.modeled_cost_eur)));
+        card.appendChild(create("p", "share-caption", "Optimized " + money(row.optimized_cost_eur) + ", savings " + money(row.theoretical_savings_eur)));
+        latest.appendChild(card);
+      });
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+function safeJsonForScript(json: string): string {
+  return json
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("&", "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value).replace(/[&<>"']/g, (char) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return entities[char] ?? char;
+  });
+}
+
+function formatGeneratedAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 async function writeCsv(filePath: string, rows: Record<string, unknown>[]) {

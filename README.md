@@ -37,12 +37,16 @@ Default output folder:
 
 ## Outputs
 
+- `index.html`
+- `recent_market_rebalancer_report.html`
 - `recent_market_rebalancer_report.md`
 - `recent_rebalancer_payload.json`
 - `recommended_provider_share_changes.csv`
 - `top_tomorrow_moves.csv`
 - `tomorrow_forecast_by_price_class.csv`
 - `tomorrow_unit_price_assumptions.csv`
+
+Open `index.html` directly in a browser, or serve the output folder as a static website. The HTML report embeds the same generated payload and renders the dashboard with browser JavaScript; the existing Markdown, JSON, and CSV outputs are still written.
 
 ## Type Check
 
